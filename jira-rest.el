@@ -30,12 +30,21 @@
   "The auth header used to authenticate each request. Please
 see URL https://developer.atlassian.com/display/JIRADEV/JIRA+REST+API+Example+-+Basic+AuthenticationConsists for more information.")
 
-(defun load-auth-info ()
+(defun old-load-auth-info ()
   (let ((jira-pwd-file (expand-file-name "~/.jira-auth-info.el")))
     (if (file-regular-p jira-pwd-file)
         (load jira-pwd-file))))
 
+(setq jira-username "Ben Walsh"
+      jira-password nil
+      jira-rest-endpoint "https://jira.byhiras.com/rest/api/latest/")
+
+(defun load-auth-info ()
+  (unless (> (length jira-password) 0)
+    (setq jira-password (read-passwd "JIRA password: "))))
+
 (defun jira-rest-login ()
+  (interactive)
   (if (load-auth-info)
       (let ((enc (base64-encode-string
                   (concat jira-username ":" jira-password))))
@@ -157,27 +166,23 @@ value in .jira-auth-info.el.")
   "Interact with the API using method 'method' and data 'data'.
 Optional arg 'path' may be provided to specify another location further
 down the URL structure to send the request."
-  (if (not jira-rest-auth-info)
-      (message "You must login first, 'M-x jira-rest-login'.")
-    (let ((url-request-method method)
-          (url-request-extra-headers
-           `(("Content-Type" . "application/json")
-             ("Authorization" . ,jira-rest-auth-info)))
-          (url-request-data data)
-          (target (concat jira-rest-endpoint path)))
-      (with-current-buffer (current-buffer)
-        (url-retrieve target 'my-switch-to-url-buffer `(,method))))))
-
-(defun my-switch-to-url-buffer (status method)
-  "Callback function to capture the contents of the response."
-  (with-current-buffer (current-buffer)
-    ;; Don't try to read the buffer if the method was DELETE,
-    ;; since we won't get a response back.
-    (if (not (equal method "DELETE"))
-        (let ((data (buffer-substring (search-forward-regexp "^$")
-                                      (point-max))))
-          (setq response (json-read-from-string data))))
-    (kill-buffer (current-buffer))))
+  (progn
+    (if (not jira-rest-auth-info)
+        (jira-rest-login))
+      ;;(message "You must login first, 'M-x jira-rest-login'.")
+    (let* ((url-request-method method)
+           (url-request-extra-headers
+            `(("Content-Type" . "application/json")
+              ("Authorization" . ,jira-rest-auth-info)))
+           (url-request-data data)
+           (target (concat jira-rest-endpoint path))
+           (buf (url-retrieve-synchronously target)))
+      (unless (equal method "DELETE")
+        (with-current-buffer buf
+          (beginning-of-buffer)
+          (let ((data (buffer-substring (search-forward-regexp "^$")
+                                        (point-max))))
+            (json-read-from-string data)))))))
 
 (defun jira-rest-mode-quit ()
   (interactive)
@@ -192,7 +197,7 @@ enables us to allow either type of user input."
   (if (not (equal 0 (string-to-number s)))
       "id"))
 
-(defun jira-rest-create-issue (project summary description issuetype)
+(defun jira-rest-create-issue-simple (project summary description issuetype)
   "File a new issue with JIRA."
   (interactive (list (read-string "Project Key: ")
                      (read-string "Summary: ")
@@ -220,32 +225,52 @@ enables us to allow either type of user input."
         (puthash "description" description issue-hash)
         (puthash "fields" issue-hash field-hash)
         ;; Return the JSON-encoded hash map.
-        (jira-rest-api-interact "POST" (json-encode field-hash))
+        (jira-rest-api-interact "POST" (json-encode field-hash) "issue")
         response))))
+
+(defun jira-rest-get-issue (k)
+  "File a new issue with JIRA."
+  (jira-rest-api-interact "GET" nil (concat "issue/" k)))
+
+(defun jira-rest-create-issue (fields)
+  "File a new issue with JIRA."
+  (let* ((restdata (list (cons 'fields fields)))
+         (res (jira-rest-api-interact "POST" (json-encode restdata) "issue")))
+    (message "got result %S" res)
+    (cdr (assoc 'key res))))
+
+(defun jira-rest-create-subtask (fields parent-id)
+  (let ((allfields (cons (cons 'parent (list (cons 'key parent-id))) fields)))
+    (jira-rest-create-issue allfields)))
+
+(defun jira-rest-update-issue (k fields)
+  "Update an issue in JIRA."
+  (let ((restdata (list (cons 'fields fields))))
+    (jira-rest-api-interact "PUT" (json-encode restdata) (concat "issue/" k))))
 
 (defun jira-rest-delete-issue (k)
   "Delete an issue with unique identifier 'k'. 'k' is either an
 issueId or key."
   (interactive (list (read-string "Issue Key or ID: ")))
-  (jira-rest-api-interact "DELETE" nil k))
+  (jira-rest-api-interact "DELETE" nil (concat "issue/" k)))
 
 (defun jira-rest-get-watchers (k)
   "Get all the watchers for an issue."
   (interactive (list (read-string "Issue Key or ID: ")))
-  (jira-rest-api-interact "GET" nil (concat k "/watchers")))
+  (jira-rest-api-interact "GET" nil (concat "issue/" k "/watchers")))
 
 (defun jira-rest-add-watcher (k name)
   "Add a watcher to an issue."
   (interactive (list (read-string "Issue Key or ID: ")
                      (read-string "Username to Add as Watcher: ")))
-  (jira-rest-api-interact "POST" (json-encode name) (concat k "/watchers")))
+  (jira-rest-api-interact "POST" (json-encode name) (concat "issue/" k "/watchers")))
 
 (defun jira-rest-remove-watcher (k name)
   "Remove a watcher from an issue."
   (interactive (list (read-string "Issue Key or ID: ")
                      (read-string "Username to Remove as Watcher: ")))
-  (jira-rest-api-interact "DELETE" nil (concat k "/watchers?" name)))
-  
+  (jira-rest-api-interact "DELETE" nil (concat "issue/" k "/watchers?" name)))
+
 (defun jira-rest-change-assignee (k &optional name)
   "Change the assignee for an issue."
   (interactive (list (read-string "Issue Key or ID: ")
@@ -254,7 +279,95 @@ issueId or key."
     (progn
       (puthash "name" name name-hash)
       (jira-rest-api-interact "PUT" (json-encode name-hash)
-                              (concat k "/assignee")))))
+                              (concat "issue/" k "/assignee")))))
+
+(defun jira-rest-get-transitions (k)
+  (jira-rest-api-interact "GET" nil (concat "issue/" k "/transitions")))
+
+(setq jira-rest-cached-data (make-hash-table :test 'equal))
+
+(defun jira-get-cached (tag func)
+  (let ((res (gethash tag jira-rest-cached-data)))
+    (unless res
+      (progn
+        (setq res (funcall func))
+        (puthash tag res jira-rest-cached-data)))
+    res))
+
+(defun jira-rest-get-projects ()
+  (interactive)
+  (jira-get-cached 'projects
+                   (lambda ()
+                     (jira-rest-api-interact "GET" nil "project"))))
+
+(defun jira-rest-do-jql-search (jql)
+  (interactive (list (read-string "JQL: ")))
+  (let ((restdata (jira-rest-api-interact "GET" nil (concat "search?jql=" (url-hexify-string jql)))))
+    (cdr (assoc 'issues restdata))))
+
+(defun jira-rest-get-statuses ()
+  (jira-get-cached 'statuses
+                   (lambda ()
+                     (let ((restdata (jira-rest-api-interact "GET" nil (concat "project/" "BYHI" "/statuses"))))
+                       restdata))))
+
+(defun jira-rest-get-components (project)
+  (jira-get-cached (concat "components/" project)
+                   (lambda ()
+                     (let ((restdata (jira-rest-api-interact "GET" nil (concat "project/" project "/components"))))
+                       (mapcar (lambda (compo)
+                                 (cons (cdr (assoc 'id compo)) (cdr (assoc 'name compo))))
+                               restdata)))))
+
+(defun jira-rest-get-priorities ()
+  (jira-get-cached 'priorities
+                   (lambda ()
+                     (let ((restdata (jira-rest-api-interact "GET" nil "priority")))
+                       (mapcar (lambda (prio)
+                                 (cons (cdr (assoc 'id prio)) (cdr (assoc 'name prio))))
+                               restdata)))))
+
+(defun jira-rest-get-issue-types-internal ()
+  (jira-get-cached 'issue-types
+                   (lambda ()
+                     (let ((restdata (jira-rest-api-interact "GET" nil "issuetype")))
+                       restdata))))
+
+(defun jira-rest-get-issue-types ()
+  (mapcar (lambda (elem)
+            (cons (cdr (assoc 'id elem)) (cdr (assoc 'name elem))))
+          (remove-if (lambda (elem) (equal (cdr (assoc 'subtask elem)) t))
+                     (jira-rest-get-issue-types-internal))))
+
+(defun jira-rest-get-subtask-types ()
+  (mapcar (lambda (elem)
+            (cons (cdr (assoc 'id elem)) (cdr (assoc 'name elem))))
+          (remove-if-not (lambda (elem) (equal (cdr (assoc 'subtask elem)) t))
+                         (jira-rest-get-issue-types-internal))))
+
+(defun jira-rest-get-resolutions ()
+  (jira-get-cached 'resolutions
+                   (lambda ()
+                     (let ((restdata (jira-rest-api-interact "GET" nil "resolution")))
+                       (mapcar (lambda (reso)
+                                 (cons (cdr (assoc 'id reso)) (cdr (assoc 'name reso))))
+                               restdata)))))
+
+;;    (cdr (assoc 'statuses restdata))))
+
+(defun jira-rest-get-issue-regexp ()
+  "Return a regexp that will match an issue id.
+
+The regexp is constructed from the project keys in the JIRA
+database.  An issue is assumed to be in the format KEY-NUMBER,
+where KEY is a project key and NUMBER is the issue number."
+  "\\<BYHI-[0-9]+\\>")
+
+(defun jira-rest-make-list (data field)
+  "Map all assoc elements in DATA to the value of FIELD in that element."
+  (mapcar (lambda (elem)
+            (cdr (assoc field elem)))
+          data))
 
 (provide 'jira-rest)
 ;;; jira-rest.el ends here
