@@ -35,25 +35,45 @@ see URL https://developer.atlassian.com/display/JIRADEV/JIRA+REST+API+Example+-+
     (if (file-regular-p jira-pwd-file)
         (load jira-pwd-file))))
 
-(setq jira-username "Ben Walsh"
-      jira-password nil
-      jira-rest-endpoint "https://jira.byhiras.com/rest/api/latest/")
+(defvar jira-rest-username nil
+  "JIRA REST username")
+
+(defvar jira-rest-password nil
+  "JIRA REST password")
+
+(defvar jira-rest-server nil
+  "JIRA REST server URL up to but not including '/rest'")
+
+(defvar jira-rest-proj-id nil
+  "JIRA REST project key prefix")
 
 (defun load-auth-info ()
-  (unless (> (length jira-password) 0)
-    (setq jira-password (read-passwd "JIRA password: "))))
+  (unless (> (length jira-rest-password) 0)
+    (setq jira-rest-password (read-passwd "JIRA password: "))))
+
+(defun jira-rest-setup-endpoint ()
+  (if (or (equal jira-rest-endpoint nil)
+          (equal jira-rest-endpoint ""))
+      (if jira-rest-server
+          (setq jira-rest-endpoint (concat jira-rest-server "/rest/api/latest/"))
+        (message "jira-rest-endpoint not set! Please set this
+value in .jira-auth-info.el.")
+        nil)
+    t))
 
 (defun jira-rest-login ()
   (interactive)
-  (if (load-auth-info)
-      (let ((enc (base64-encode-string
-                  (concat jira-username ":" jira-password))))
-        (setq jira-rest-auth-info (concat "Basic " enc)))
-    (message "You must provide your login information.")))
+  (if (jira-rest-setup-endpoint)
+      (if (load-auth-info)
+          (let ((enc (base64-encode-string
+                      (concat jira-rest-username ":" jira-rest-password))))
+            (setq jira-rest-auth-info (concat "Basic " enc)))
+        (message "You must provide your login information.")
+        nil)))
 
 (defcustom jira-rest-endpoint ""
   "The URL of the REST API endpoint for user's JIRA
- installation."
+ installation, with trailing '/'."
   :group 'jira-rest
   :type 'string
   :initialize 'custom-initialize-set)
@@ -123,24 +143,20 @@ Requires JIRA 5.0 or greater.
 
 \\{jira-rest-mode-map}"
   (interactive)
-  (jira-rest-login)
-  (if (or (equal jira-rest-endpoint nil)
-          (equal jira-rest-endpoint ""))
-      (message "jira-rest-endpoint not set! Please set this
-value in .jira-auth-info.el.")
-    (progn
-      (switch-to-buffer "*JIRA-REST*")
-      (kill-all-local-variables)
-      (setq major-mode 'jira-rest-mode)
-      (setq mode-name "JIRA-REST")
-      (use-local-map jira-rest-mode-map)
-      (run-hooks 'jira-rest-mode-hook)
-      ;; (jira-rest-store-projects)
-      ;; (jira-rest-store-priorities)
-      ;; (jira-rest-store-statuses)
-      ;; (jira-rest-store-types)
-      (insert "Welcome to jira-rest-mode!")
-      (message "jira rest mode loaded!"))))
+  (if (jira-rest-login)
+      (progn
+        (switch-to-buffer "*JIRA-REST*")
+        (kill-all-local-variables)
+        (setq major-mode 'jira-rest-mode)
+        (setq mode-name "JIRA-REST")
+        (use-local-map jira-rest-mode-map)
+        (run-hooks 'jira-rest-mode-hook)
+        ;; (jira-rest-store-projects)
+        ;; (jira-rest-store-priorities)
+        ;; (jira-rest-store-statuses)
+        ;; (jira-rest-store-types)
+        (insert "Welcome to jira-rest-mode!")
+        (message "jira rest mode loaded!"))))
 
 (defvar jira-rest-current-issue nil
   "This holds the currently selected issue.")
@@ -308,7 +324,7 @@ issueId or key."
 (defun jira-rest-get-statuses ()
   (jira-get-cached 'statuses
                    (lambda ()
-                     (let ((restdata (jira-rest-api-interact "GET" nil (concat "project/" "BYHI" "/statuses"))))
+                     (let ((restdata (jira-rest-api-interact "GET" nil (concat "project/" jira-rest-proj-id "/statuses"))))
                        restdata))))
 
 (defun jira-rest-get-components (project)
@@ -361,7 +377,7 @@ issueId or key."
 The regexp is constructed from the project keys in the JIRA
 database.  An issue is assumed to be in the format KEY-NUMBER,
 where KEY is a project key and NUMBER is the issue number."
-  "\\<BYHI-[0-9]+\\>")
+  (concat "\\<" jira-rest-proj-id "-[0-9]+\\>"))
 
 (defun jira-rest-make-list (data field)
   "Map all assoc elements in DATA to the value of FIELD in that element."
