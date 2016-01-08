@@ -364,17 +364,19 @@ issueId or key."
   (interactive (list (read-string "JQL: ")))
   (let ((start-at 0)
         (result nil)
+        (max-results 50)
         (working t))
     (while working  ;; JIRA "total" field may be absent, so just repeat until empty result.
       (let* ((restdata (jira-rest-api-interact "GET" nil
                                                (concat "search?fields=%2Anavigable%2Ccomment"
                                                        "&startAt=" (number-to-string start-at)
-                                                       "&maxResults=50"
+                                                       "&maxResults=" (number-to-string max-results)
                                                        "&jql=" (url-hexify-string jql))))
              (issues (cdr (assoc 'issues restdata))))
         (setq result (append result issues nil))  ;; convert vector to list
         (setq start-at (+ start-at (length issues)))
-        (setq working (> (length issues) 0))
+        (setq max-results (cdr (assoc 'maxResults restdata)))
+        (setq working (>= (length issues) max-results))
         ))
     result))
 
