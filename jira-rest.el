@@ -30,11 +30,6 @@
   "The auth header used to authenticate each request. Please
 see URL https://developer.atlassian.com/display/JIRADEV/JIRA+REST+API+Example+-+Basic+AuthenticationConsists for more information.")
 
-(defun old-load-auth-info ()
-  (let ((jira-pwd-file (expand-file-name "~/.jira-auth-info.el")))
-    (if (file-regular-p jira-pwd-file)
-        (load jira-pwd-file))))
-
 (defvar jira-rest-username nil
   "JIRA REST username")
 
@@ -48,8 +43,13 @@ see URL https://developer.atlassian.com/display/JIRADEV/JIRA+REST+API+Example+-+
   "JIRA REST project key prefix")
 
 (defun load-auth-info ()
-  (unless (> (length jira-rest-password) 0)
-    (setq jira-rest-password (read-passwd "JIRA password: "))))
+  (progn
+    (if (= (length jira-rest-username) 0)
+        (let ((jira-pwd-file (expand-file-name "~/.jira-auth-info.el")))
+          (if (file-regular-p jira-pwd-file)
+              (load jira-pwd-file))))
+    (unless (> (length jira-rest-password) 0)
+      (setq jira-rest-password (read-passwd "JIRA password: ")))))
 
 (defun jira-rest-setup-endpoint ()
   (if (or (equal jira-rest-endpoint nil)
@@ -126,7 +126,7 @@ value in .jira-auth-info.el.")
     nil
   (progn
     (setq jira-rest-mode-map (make-sparse-keymap))
-    (define-key jira-rest-mode-map "c" 'jira-rest-create-issue)
+    (define-key jira-rest-mode-map "c" 'jira-rest-create-issue-simple)
     (define-key jira-rest-mode-map "di" 'jira-rest-delete-issue)
     (define-key jira-rest-mode-map "a" 'jira-rest-change-assignee)
     (define-key jira-rest-mode-map "gg" 'jira-rest-get-watchers)
@@ -178,6 +178,23 @@ Requires JIRA 5.0 or greater.
 
 (defvar response nil)
 
+(defun jira-rest-api-url-interact (method data target)
+  "Interact with the API using method 'method' and data 'data'.
+Url parameter specifies URL."
+  (let* ((url-request-method method)
+         (url-request-extra-headers
+          `(("Content-Type" . "application/json")
+            ("Authorization" . ,jira-rest-auth-info)))
+         (url-request-data data)
+         (buf (url-retrieve-synchronously target)))
+    (unless (equal method "DELETE")
+      (with-current-buffer buf
+        (beginning-of-buffer)
+        (let ((data (buffer-substring (+ (search-forward-regexp "^$") 1)
+                                      (point-max))))
+          (or (= (length data) 0)
+              (json-read-from-string data)))))))
+
 (defun jira-rest-api-interact (method data &optional path)
   "Interact with the API using method 'method' and data 'data'.
 Optional arg 'path' may be provided to specify another location further
@@ -185,20 +202,8 @@ down the URL structure to send the request."
   (progn
     (if (not jira-rest-auth-info)
         (jira-rest-login))
-      ;;(message "You must login first, 'M-x jira-rest-login'.")
-    (let* ((url-request-method method)
-           (url-request-extra-headers
-            `(("Content-Type" . "application/json")
-              ("Authorization" . ,jira-rest-auth-info)))
-           (url-request-data data)
-           (target (concat jira-rest-endpoint path))
-           (buf (url-retrieve-synchronously target)))
-      (unless (equal method "DELETE")
-        (with-current-buffer buf
-          (beginning-of-buffer)
-          (let ((data (buffer-substring (search-forward-regexp "^$")
-                                        (point-max))))
-            (json-read-from-string data)))))))
+    ;;(message "You must login first, 'M-x jira-rest-login'.")
+    (jira-rest-api-url-interact method data (concat jira-rest-endpoint path))))
 
 (defun jira-rest-mode-quit ()
   (interactive)
@@ -302,6 +307,45 @@ issueId or key."
 
 (setq jira-rest-cached-data (make-hash-table :test 'equal))
 
+(defun jira-rest-get-comments (k)
+  (let ((restdata (jira-rest-api-interact "GET" nil (concat "issue/" k "/comment"))))
+    (cdr (assoc 'comments restdata))))
+
+(defun jira-rest-add-comment (k comment)
+  (let* ((restdata (list (cons 'body comment)))
+         (res (jira-rest-api-interact "POST" (json-encode restdata) (concat "issue/" k "/comment"))))
+    (message "got result %S" res)
+    (cdr (assoc 'id res))))
+
+(defun jira-rest-edit-comment (k id comment)
+  (let* ((restdata (list (cons 'body comment)))
+         (res (jira-rest-api-interact "PUT" (json-encode restdata) (concat "issue/" k "/comment/" id))))
+    (message "got result %S" res)
+    (cdr (assoc 'id res))))
+
+(defun jira-rest-get-saved-filters ()
+  (let ((restdata (jira-rest-api-interact "GET" nil (concat "filter/favourite"))))
+    (mapcar (lambda (filter)
+              (cons (cdr (assoc 'id filter)) (cdr (assoc 'name filter))))
+            restdata)))
+
+(defun jira-rest-get-issues-from-filter (id)
+  (let* ((filterdata (jira-rest-api-interact "GET" nil (concat "filter/" id)))
+         (search-url (cdr (assoc 'searchUrl filterdata)))
+         (restdata (jira-rest-api-url-interact "GET" nil search-url)))
+    (cdr (assoc 'issues restdata))))
+
+(defun jira-rest-get-available-actions (k)
+  (let ((restdata (jira-rest-api-interact "GET" nil (concat "issue/" k
+                                                            "/transitions?expand="
+                                                            (url-hexify-string "transitions.fields")))))
+    (cdr (assoc 'transitions restdata))))
+
+(defun jira-rest-progress-workflow-action (k action-id fields)
+  (let* ((restdata (list (cons 'transition (list (cons 'id action-id)))))
+         (res (jira-rest-api-interact "POST" (json-encode restdata) (concat "issue/" k "/transitions"))))
+    k))
+
 (defun jira-get-cached (tag func)
   (let ((res (gethash tag jira-rest-cached-data)))
     (unless res
@@ -318,8 +362,21 @@ issueId or key."
 
 (defun jira-rest-do-jql-search (jql)
   (interactive (list (read-string "JQL: ")))
-  (let ((restdata (jira-rest-api-interact "GET" nil (concat "search?jql=" (url-hexify-string jql)))))
-    (cdr (assoc 'issues restdata))))
+  (let ((start-at 0)
+        (result nil)
+        (working t))
+    (while working  ;; JIRA "total" field may be absent, so just repeat until empty result.
+      (let* ((restdata (jira-rest-api-interact "GET" nil
+                                               (concat "search?fields=%2Anavigable%2Ccomment"
+                                                       "&startAt=" (number-to-string start-at)
+                                                       "&maxResults=50"
+                                                       "&jql=" (url-hexify-string jql))))
+             (issues (cdr (assoc 'issues restdata))))
+        (setq result (append result issues nil))  ;; convert vector to list
+        (setq start-at (+ start-at (length issues)))
+        (setq working (> (length issues) 0))
+        ))
+    result))
 
 (defun jira-rest-get-statuses ()
   (jira-get-cached 'statuses
